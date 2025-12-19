@@ -1,16 +1,30 @@
 const faceapi = require("face-api.js")
-const { Canvas, Image, ImageData, loadImage } = require("canvas")
 const path = require("path")
+const fs = require("fs")
+
+// Safely load canvas to prevent server crash on environments where it's not supported
+let canvas = {}
+try {
+  canvas = require("canvas")
+} catch (e) {
+  console.warn("Canvas failed to load (Face API will be disabled):", e.message)
+}
+const { Canvas, Image, ImageData, loadImage } = canvas
 
 // 1. Configure FaceAPI for Node.js environment
-faceapi.env.monkeyPatch({ Canvas, Image, ImageData })
+if (Canvas) {
+  faceapi.env.monkeyPatch({ Canvas, Image, ImageData })
+}
 
 // 2. Load Models (Ensure you have a 'models' folder in api/express-api/)
 const modelsPath = path.join(__dirname, "..", "models")
 let modelsLoaded = false
 
 const loadModels = async () => {
-  if (modelsLoaded) return
+  if (modelsLoaded || !Canvas) return
+  if (!fs.existsSync(modelsPath)) {
+    throw new Error(`FaceAPI models not found at ${modelsPath}. Ensure 'node download-models.js' runs during build (add as 'postinstall' script in package.json).`)
+  }
   await faceapi.nets.ssdMobilenetv1.loadFromDisk(modelsPath)
   await faceapi.nets.faceLandmark68Net.loadFromDisk(modelsPath)
   await faceapi.nets.faceRecognitionNet.loadFromDisk(modelsPath)
@@ -61,6 +75,10 @@ exports.createEmployee = async (req, res) => {
     let is_registered = false;
 
     if (image) {
+      if (!loadImage) {
+        return res.status(500).json({ error: "Server Error: Face processing libraries (Canvas) are not available in this environment." });
+      }
+
       if (!modelsLoaded) await loadModels();
       const base64Data = image.replace(/^data:image\/\w+;base64,\s*/i, "");
       const imgBuffer = Buffer.from(base64Data, "base64");

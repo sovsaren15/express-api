@@ -41,6 +41,10 @@ app.use("/admin", adminRoutes)
 app.use("/employee", employeeRoutes)
 
 // Health check
+app.get("/", (req, res) => {
+  res.json({ status: "Attendance System API is running" })
+})
+
 app.get("/health", (req, res) => {
   res.json({ status: "API is running" })
 })

@@ -1,9 +1,17 @@
 require('dotenv').config();
 const { createClient } = require('@supabase/supabase-js');
 const faceapi = require("face-api.js");
-const { Canvas, Image, ImageData, loadImage } = require("canvas");
-const tf = require("@tensorflow/tfjs");
 const path = require("path");
+const fs = require("fs");
+
+// Safely load canvas
+let canvas = {};
+try {
+  canvas = require("canvas");
+} catch (e) {
+  console.warn("Canvas failed to load:", e.message);
+}
+const { Canvas, Image, ImageData, loadImage } = canvas;
 
 // Initialize Supabase client
 // Ensure SUPABASE_URL and SUPABASE_KEY (or SUPABASE_SERVICE_ROLE_KEY) are in your .env file
@@ -12,13 +20,18 @@ const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABAS
 const supabase = createClient(supabaseUrl, supabaseKey);
 
 // Configure FaceAPI
-faceapi.env.monkeyPatch({ Canvas, Image, ImageData });
+if (Canvas) {
+  faceapi.env.monkeyPatch({ Canvas, Image, ImageData });
+}
 
 const modelsPath = path.join(__dirname, "..", "models");
 let modelsLoaded = false;
 
 const loadModels = async () => {
-  if (modelsLoaded) return;
+  if (modelsLoaded || !Canvas) return;
+  if (!fs.existsSync(modelsPath)) {
+    throw new Error(`FaceAPI models not found at ${modelsPath}. Ensure 'node download-models.js' runs during build.`);
+  }
   await faceapi.nets.ssdMobilenetv1.loadFromDisk(modelsPath);
   await faceapi.nets.faceLandmark68Net.loadFromDisk(modelsPath);
   await faceapi.nets.faceRecognitionNet.loadFromDisk(modelsPath);
@@ -60,6 +73,10 @@ const checkIn = async (req, res) => {
     if (!employee.face_encoding) return res.status(400).json({ error: 'Face not registered. Please contact admin.' });
 
     // 2. Get encoding for current captured image locally
+    if (!loadImage) {
+      return res.status(500).json({ error: "Face verification unavailable: Server missing graphics libraries." });
+    }
+
     if (!modelsLoaded) await loadModels();
 
     const img = await loadImage(imageBuffer);
@@ -126,6 +143,10 @@ const checkOut = async (req, res) => {
     if (!employee.face_encoding) return res.status(400).json({ error: 'Face not registered. Please contact admin.' });
 
     // 2. Get encoding for current captured image locally
+    if (!loadImage) {
+      return res.status(500).json({ error: "Face verification unavailable: Server missing graphics libraries." });
+    }
+
     if (!modelsLoaded) await loadModels();
 
     const img = await loadImage(imageBuffer);
