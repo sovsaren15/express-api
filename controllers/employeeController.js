@@ -32,7 +32,7 @@ const loadModels = async () => {
   if (!fs.existsSync(modelsPath)) {
     throw new Error(`FaceAPI models not found at ${modelsPath}. Ensure 'node download-models.js' runs during build.`);
   }
-  await faceapi.nets.tinyFaceDetector.loadFromDisk(modelsPath);
+  await faceapi.nets.ssdMobilenetv1.loadFromDisk(modelsPath);
   await faceapi.nets.faceLandmark68Net.loadFromDisk(modelsPath);
   await faceapi.nets.faceRecognitionNet.loadFromDisk(modelsPath);
   modelsLoaded = true;
@@ -80,7 +80,7 @@ const checkIn = async (req, res) => {
     if (!modelsLoaded) await loadModels();
 
     const img = await loadImage(imageBuffer);
-    const detection = await faceapi.detectSingleFace(img, new faceapi.TinyFaceDetectorOptions({ inputSize: 320 })).withFaceLandmarks().withFaceDescriptor();
+    const detection = await faceapi.detectSingleFace(img).withFaceLandmarks().withFaceDescriptor();
 
     if (!detection) return res.status(400).json({ error: "No face detected in camera feed" });
     const currentEncoding = detection.descriptor;
@@ -150,7 +150,7 @@ const checkOut = async (req, res) => {
     if (!modelsLoaded) await loadModels();
 
     const img = await loadImage(imageBuffer);
-    const detection = await faceapi.detectSingleFace(img, new faceapi.TinyFaceDetectorOptions({ inputSize: 320 })).withFaceLandmarks().withFaceDescriptor();
+    const detection = await faceapi.detectSingleFace(img).withFaceLandmarks().withFaceDescriptor();
 
     if (!detection) return res.status(400).json({ error: "No face detected in camera feed" });
     const currentEncoding = detection.descriptor;
