@@ -47,6 +47,7 @@ app.locals.supabase = supabase;
    Vercel auto adds /api
 ========================= */
 app.use("/auth", authRoutes);
+app.use("/", authRoutes);
 app.use("/admin", adminRoutes);
 app.use("/employee", employeeRoutes);
 
