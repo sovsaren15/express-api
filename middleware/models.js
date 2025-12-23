@@ -49,6 +49,6 @@ files.forEach((file) => {
     })
   }).on("error", (err) => {
     console.error(`Error downloading ${file}: ${err.message}`)
-    fs.unlink(filePath, () => {}) // Delete partial file
+    fs.unlink(filePath, () => {}) // Delete partial file .
   })
 })
