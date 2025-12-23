@@ -2,13 +2,12 @@ const fs = require("fs")
 const path = require("path")
 const https = require("https")
 
-const modelsDir = path.join(__dirname, "models")
+const modelsDir = path.join(__dirname, "..", "models")
 const baseUrl = "https://raw.githubusercontent.com/justadudewhohacks/face-api.js/master/weights"
 
 const files = [
-  "ssd_mobilenetv1_model-weights_manifest.json",
-  "ssd_mobilenetv1_model-shard1",
-  "ssd_mobilenetv1_model-shard2",
+  "tiny_face_detector_model-weights_manifest.json",
+  "tiny_face_detector_model-shard1",
   "face_landmark_68_model-weights_manifest.json",
   "face_landmark_68_model-shard1",
   "face_recognition_model-weights_manifest.json",
@@ -37,6 +36,7 @@ files.forEach((file) => {
   https.get(url, (res) => {
     if (res.statusCode !== 200) {
       console.error(`Failed to download ${file}: HTTP ${res.statusCode}`)
+      fs.unlink(filePath, () => {})
       res.resume()
       return
     }

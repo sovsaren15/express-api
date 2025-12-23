@@ -1,4 +1,9 @@
 require('dotenv').config();
+try {
+  require('@tensorflow/tfjs-node');
+} catch (e) {
+  console.warn("Failed to load @tensorflow/tfjs-node, using pure JS fallback:", e.message);
+}
 const { createClient } = require('@supabase/supabase-js');
 const faceapi = require("face-api.js");
 const path = require("path");
@@ -32,11 +37,17 @@ const loadModels = async () => {
   if (!fs.existsSync(modelsPath)) {
     throw new Error(`FaceAPI models not found at ${modelsPath}. Ensure 'node download-models.js' runs during build.`);
   }
-  await faceapi.nets.ssdMobilenetv1.loadFromDisk(modelsPath);
+  if (!fs.existsSync(path.join(modelsPath, "tiny_face_detector_model-weights_manifest.json"))) {
+    throw new Error(`Model files missing in ${modelsPath}. Please run 'node download-models.js'.`);
+  }
+  await faceapi.nets.tinyFaceDetector.loadFromDisk(modelsPath);
   await faceapi.nets.faceLandmark68Net.loadFromDisk(modelsPath);
   await faceapi.nets.faceRecognitionNet.loadFromDisk(modelsPath);
   modelsLoaded = true;
 };
+
+// Preload models on server start to reduce first-request latency
+loadModels().catch(console.error);
 
 const getEuclideanDistance = (face1, face2) => {
   if (!face1 || !face2 || face1.length !== face2.length) return Infinity;
@@ -62,27 +73,26 @@ const checkIn = async (req, res) => {
       return res.status(401).json({ error: 'Unauthorized: User not identified' });
     }
 
-    // 1. Verify Face: Get registered encoding
-    const { data: employee, error: empError } = await supabase
+    // Parallelize DB fetch and Image Processing for speed
+    const employeeTask = supabase
       .from('employees')
       .select('face_encoding')
       .eq('id', user.id)
       .single();
 
+    const detectionTask = (async () => {
+      if (!loadImage) throw new Error("Face verification unavailable: Server missing graphics libraries.");
+      if (!modelsLoaded) await loadModels();
+      const img = await loadImage(imageBuffer);
+      return faceapi.detectSingleFace(img, new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.5 })).withFaceLandmarks().withFaceDescriptor();
+    })();
+
+    const [{ data: employee, error: empError }, detection] = await Promise.all([employeeTask, detectionTask]);
+
     if (empError || !employee) return res.status(404).json({ error: 'Employee record not found' });
     if (!employee.face_encoding) return res.status(400).json({ error: 'Face not registered. Please contact admin.' });
-
-    // 2. Get encoding for current captured image locally
-    if (!loadImage) {
-      return res.status(500).json({ error: "Face verification unavailable: Server missing graphics libraries." });
-    }
-
-    if (!modelsLoaded) await loadModels();
-
-    const img = await loadImage(imageBuffer);
-    const detection = await faceapi.detectSingleFace(img).withFaceLandmarks().withFaceDescriptor();
-
     if (!detection) return res.status(400).json({ error: "No face detected in camera feed" });
+
     const currentEncoding = detection.descriptor;
 
     // 3. Compare Encodings
@@ -132,37 +142,14 @@ const checkOut = async (req, res) => {
       return res.status(401).json({ error: 'Unauthorized: User not identified' });
     }
 
-    // 1. Verify Face: Get registered encoding
-    const { data: employee, error: empError } = await supabase
+    // Parallelize tasks: Fetch Employee, Fetch Last Check-In, Process Face
+    const employeeTask = supabase
       .from('employees')
       .select('face_encoding')
       .eq('id', user.id)
       .single();
 
-    if (empError || !employee) return res.status(404).json({ error: 'Employee record not found' });
-    if (!employee.face_encoding) return res.status(400).json({ error: 'Face not registered. Please contact admin.' });
-
-    // 2. Get encoding for current captured image locally
-    if (!loadImage) {
-      return res.status(500).json({ error: "Face verification unavailable: Server missing graphics libraries." });
-    }
-
-    if (!modelsLoaded) await loadModels();
-
-    const img = await loadImage(imageBuffer);
-    const detection = await faceapi.detectSingleFace(img).withFaceLandmarks().withFaceDescriptor();
-
-    if (!detection) return res.status(400).json({ error: "No face detected in camera feed" });
-    const currentEncoding = detection.descriptor;
-
-    // 3. Compare Encodings
-    const distance = getEuclideanDistance(employee.face_encoding, currentEncoding);
-    if (distance > 0.5) {
-      return res.status(403).json({ error: "Face verification failed: Not your face" });
-    }
-
-    // 1. Find the latest open check-in (where check_out_time is null)
-    const { data: lastCheckIn, error: findError } = await supabase
+    const lastCheckInTask = supabase
       .from('attendance')
       .select('*')
       .eq('employee_id', user.id)
@@ -170,6 +157,30 @@ const checkOut = async (req, res) => {
       .order('check_in_time', { ascending: false })
       .limit(1)
       .maybeSingle();
+
+    const detectionTask = (async () => {
+      if (!loadImage) throw new Error("Face verification unavailable: Server missing graphics libraries.");
+      if (!modelsLoaded) await loadModels();
+      const img = await loadImage(imageBuffer);
+      return faceapi.detectSingleFace(img, new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.5 })).withFaceLandmarks().withFaceDescriptor();
+    })();
+
+    const [
+      { data: employee, error: empError },
+      { data: lastCheckIn, error: findError },
+      detection
+    ] = await Promise.all([employeeTask, lastCheckInTask, detectionTask]);
+
+    if (empError || !employee) return res.status(404).json({ error: 'Employee record not found' });
+    if (!employee.face_encoding) return res.status(400).json({ error: 'Face not registered. Please contact admin.' });
+    if (!detection) return res.status(400).json({ error: "No face detected in camera feed" });
+
+    const currentEncoding = detection.descriptor;
+    const distance = getEuclideanDistance(employee.face_encoding, currentEncoding);
+
+    if (distance > 0.5) {
+      return res.status(403).json({ error: "Face verification failed: Not your face" });
+    }
 
     if (findError) throw findError;
     if (!lastCheckIn) {
