@@ -1,7 +1,7 @@
+require('@tensorflow/tfjs-node');
 const express = require("express");
 const cors = require("cors");
 const dotenv = require("dotenv");
-require('@tensorflow/tfjs-node');
 const { createClient } = require("@supabase/supabase-js");
 
 // Routes
