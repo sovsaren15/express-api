@@ -1,15 +1,34 @@
-require('@tensorflow/tfjs-node');
+const dotenv = require("dotenv");
+dotenv.config();
+const downloadModels = require("./download-models");
+
+try {
+  require('@tensorflow/tfjs-node');
+} catch (error) {
+  console.error("⚠️ Failed to load @tensorflow/tfjs-node. Using default CPU backend.");
+  console.error("   Reason:", error.message);
+  // Mock tfjs-node with the pure JS tfjs library to prevent crashes and provide a valid tf object
+  try {
+    const tf = require('@tensorflow/tfjs');
+    const tfNodePath = require.resolve('@tensorflow/tfjs-node');
+    require.cache[tfNodePath] = {
+      id: tfNodePath,
+      filename: tfNodePath,
+      loaded: true,
+      exports: tf
+    };
+  } catch (e) {
+    console.error("Failed to mock tfjs-node:", e.message);
+  }
+}
 const express = require("express");
 const cors = require("cors");
-const dotenv = require("dotenv");
 const { createClient } = require("@supabase/supabase-js");
 
 // Routes
 const authRoutes = require("./routes/auth");
 const adminRoutes = require("./routes/admin");
 const employeeRoutes = require("./routes/employee");
-
-dotenv.config();
 
 const app = express();
 
@@ -57,6 +76,7 @@ app.locals.supabase = supabase;
    IMPORTANT:
    Vercel auto adds /api
 ========================= */
+app.use("/api", authRoutes);
 app.use("/auth", authRoutes);
 app.use("/", authRoutes);
 app.use("/admin", adminRoutes);
@@ -89,9 +109,18 @@ app.use((err, req, res, next) => {
 const PORT = process.env.PORT || 5000;
 
 if (require.main === module) {
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`🚀 Server running on port ${PORT}`);
-  });
+  // Attempt to download models if missing (runs in background to not block startup)
+  downloadModels()
+    .then(() => {
+      app.listen(PORT, "0.0.0.0", () => {
+        console.log(`🚀 Server running on port ${PORT}`);
+      });
+    })
+    .catch(err => {
+      console.error("Failed to download models:", err);
+      // Start server anyway, but face recognition endpoints might fail until fixed
+      app.listen(PORT, "0.0.0.0", () => console.log(`🚀 Server running on port ${PORT} (Models failed)`));
+    });
 }
 
 module.exports = app;

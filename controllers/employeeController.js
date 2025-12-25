@@ -1,11 +1,5 @@
-require('dotenv').config();
-try {
-  require('@tensorflow/tfjs-node');
-} catch (e) {
-  console.warn("Failed to load @tensorflow/tfjs-node, using pure JS fallback:", e.message);
-}
 const { createClient } = require('@supabase/supabase-js');
-const faceapi = require("face-api.js");
+const faceapi = require("@vladmandic/face-api");
 const path = require("path");
 const fs = require("fs");
 
@@ -26,7 +20,7 @@ const supabase = createClient(supabaseUrl, supabaseKey);
 
 // Configure FaceAPI
 if (Canvas) {
-  faceapi.env.monkeyPatch({ Canvas, Image, ImageData });
+  faceapi.env.monkeyPatch({ Canvas, Image, ImageData, readFile: fs.promises.readFile });
 }
 
 const modelsPath = path.join(__dirname, "..", "models");

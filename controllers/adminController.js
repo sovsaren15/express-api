@@ -1,4 +1,4 @@
-const faceapi = require("face-api.js")
+const faceapi = require("@vladmandic/face-api")
 const path = require("path")
 const fs = require("fs")
 
@@ -13,7 +13,7 @@ const { Canvas, Image, ImageData, loadImage } = canvas
 
 // 1. Configure FaceAPI for Node.js environment
 if (Canvas) {
-  faceapi.env.monkeyPatch({ Canvas, Image, ImageData })
+  faceapi.env.monkeyPatch({ Canvas, Image, ImageData, readFile: fs.promises.readFile })
 }
 
 // 2. Load Models (Ensure you have a 'models' folder in api/express-api/)
@@ -24,6 +24,9 @@ const loadModels = async () => {
   if (modelsLoaded || !Canvas) return
   if (!fs.existsSync(modelsPath)) {
     throw new Error(`FaceAPI models not found at ${modelsPath}. Ensure 'node download-models.js' runs during build (add as 'postinstall' script in package.json).`)
+  }
+  if (!fs.existsSync(path.join(modelsPath, "ssd_mobilenetv1_model-weights_manifest.json"))) {
+    throw new Error(`Model files missing in ${modelsPath}. Please run 'node download-models.js'.`)
   }
   await faceapi.nets.ssdMobilenetv1.loadFromDisk(modelsPath)
   await faceapi.nets.faceLandmark68Net.loadFromDisk(modelsPath)
