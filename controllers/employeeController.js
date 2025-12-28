@@ -95,14 +95,25 @@ const checkIn = async (req, res) => {
       return res.status(403).json({ error: "Face verification failed: Not your face" });
     }
 
+    const checkInDate = new Date();
+    const startTime = new Date(checkInDate);
+    startTime.setHours(8, 0, 0, 0);
+    const lateTime = new Date(checkInDate);
+    lateTime.setHours(8, 15, 0, 0);
+
+    let statusTime = 'On Time';
+    if (checkInDate < startTime) statusTime = 'Early';
+    else if (checkInDate > lateTime) statusTime = 'Late';
+
     // Insert attendance record into the 'attendance' table
     const { data, error } = await supabase
       .from('attendance')
       .insert([
         {
           employee_id: user.id,
-          check_in_time: new Date().toISOString(),
+          check_in_time: checkInDate.toISOString(),
           status: 'present',
+          status_time: statusTime,
           check_in_image: imageBuffer.toString('base64')
         }
       ])
@@ -223,7 +234,39 @@ const getAttendanceHistory = async (req, res) => {
 
     if (error) throw error;
 
-    res.status(200).json({ data, employee });
+    // Calculate Absent Stats for Current Month
+    const now = new Date();
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+    
+    let workingDays = 0;
+    const d = new Date(startOfMonth);
+    while (d <= now) {
+      const day = d.getDay();
+      if (day !== 0 && day !== 6) workingDays++;
+      d.setDate(d.getDate() + 1);
+    }
+
+    const uniquePresent = new Set();
+    data.forEach((record) => {
+      const recordDate = new Date(record.check_in_time);
+      if (recordDate >= startOfMonth && recordDate <= now) {
+        if (record.status === 'present') {
+          uniquePresent.add(recordDate.toDateString());
+        }
+      }
+    });
+
+    const absentCount = Math.max(0, workingDays - uniquePresent.size);
+
+    res.status(200).json({ 
+      data, 
+      employee, 
+      stats: { 
+        absent: absentCount,
+        workingDays,
+        present: uniquePresent.size
+      } 
+    });
   } catch (error) {
     console.error('Get Attendance History Error:', error);
     res.status(500).json({ error: error.message || 'Internal Server Error' });

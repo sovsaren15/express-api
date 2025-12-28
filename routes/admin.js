@@ -7,6 +7,8 @@ const { authenticateToken } = require("../middleware/authMiddleware")
 router.post("/employees", authenticateToken, adminController.createEmployee)
 router.get("/attendance-history", authenticateToken, adminController.getAllAttendanceHistory)
 router.get("/top-performers", authenticateToken, adminController.getTopPerformers)
+router.get("/settings", authenticateToken, adminController.getSettings)
+router.put("/settings", authenticateToken, adminController.updateSettings)
 
 // Employee management routes
 router.get("/employees", authenticateToken, employeeController.getAllEmployees)

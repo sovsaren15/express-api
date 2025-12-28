@@ -145,7 +145,7 @@ exports.getTopPerformers = async (req, res) => {
 
   try {
     const { data: records, error } = await supabase
-      .from("attendance")
+      .from("time_logs")
       .select("*, employees(first_name, last_name)")
       .not("check_in_time", "is", null)
 
@@ -173,14 +173,14 @@ exports.getTopPerformers = async (req, res) => {
       // 1. Attendance Count
       stats[empId].attendanceCount++
 
-      // 2. Late Check-in (> 9:15 AM)
+      // 2. Late Check-in (> 8:15 AM)
       const lateThreshold = new Date(checkIn)
-      lateThreshold.setHours(9, 15, 0, 0)
+      lateThreshold.setHours(8, 15, 0, 0)
       if (checkIn > lateThreshold) stats[empId].lateCount++
 
-      // 3. Early Arrival (< 9:00 AM)
+      // 3. Early Arrival (< 8:00 AM)
       const earlyThreshold = new Date(checkIn)
-      earlyThreshold.setHours(9, 0, 0, 0)
+      earlyThreshold.setHours(8, 0, 0, 0)
       if (checkIn < earlyThreshold) stats[empId].earlyCount++
 
       // 4. Overtime (> 8 hours)
@@ -207,6 +207,76 @@ exports.getTopPerformers = async (req, res) => {
   }
 }
 
+
+
+exports.getSettings = async (req, res) => {
+  const supabase = req.app.locals.supabase
+
+  try {
+    const { data, error } = await supabase
+      .from("settings")
+      .select("*")
+      .limit(1)
+      .maybeSingle()
+
+    if (error) throw error
+
+    res.status(200).json(data || {})
+  } catch (error) {
+    console.error("Get Settings Error:", error)
+    res.status(500).json({ error: error.message })
+  }
+}
+
+exports.updateSettings = async (req, res) => {
+  const supabase = req.app.locals.supabase
+  const {
+    office_latitude,
+    office_longitude,
+    office_radius_meters,
+    telegram_bot_token,
+    telegram_group_id,
+  } = req.body
+
+  try {
+    // Check if a settings row already exists
+    const { data: existing } = await supabase.from("settings").select("id").limit(1).maybeSingle()
+
+    let result
+    if (existing) {
+      const { data, error } = await supabase
+        .from("settings")
+        .update({
+          office_latitude,
+          office_longitude,
+          office_radius_meters,
+          telegram_bot_token,
+          telegram_group_id,
+        })
+        .eq("id", existing.id)
+        .select()
+        .single()
+
+      if (error) throw error
+      result = data
+    } else {
+      const { data, error } = await supabase
+        .from("settings")
+        .insert([{ office_latitude, office_longitude, office_radius_meters, telegram_bot_token, telegram_group_id }])
+        .select()
+        .single()
+
+      if (error) throw error
+      result = data
+    }
+
+    res.status(200).json(result)
+  } catch (error) {
+    console.error("Update Settings Error:", error)
+    res.status(500).json({ error: error.message })
+  }
+}
+
 exports.getAllAttendanceHistory = async (req, res) => {
   const supabase = req.app.locals.supabase
 
@@ -218,7 +288,44 @@ exports.getAllAttendanceHistory = async (req, res) => {
 
     if (error) throw error
 
-    res.status(200).json({ data })
+    // Calculate Absent Stats for Current Month
+    const now = new Date()
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1)
+
+    const { count: totalEmployees, error: empError } = await supabase
+      .from("employees")
+      .select("*", { count: "exact", head: true })
+
+    if (empError) throw empError
+
+    let workingDays = 0
+    const d = new Date(startOfMonth)
+    while (d <= now) {
+      const day = d.getDay()
+      if (day !== 0 && day !== 6) workingDays++
+      d.setDate(d.getDate() + 1)
+    }
+
+    const uniquePresent = new Set()
+    data.forEach((record) => {
+      const recordDate = new Date(record.check_in_time)
+      if (recordDate >= startOfMonth && recordDate <= now) {
+        if (record.status === "present") {
+          uniquePresent.add(`${record.employee_id}-${recordDate.toDateString()}`)
+        }
+      }
+    })
+
+    const totalAbsent = Math.max(0, (totalEmployees || 0) * workingDays - uniquePresent.size)
+
+    res.status(200).json({ 
+      data, 
+      stats: { 
+        absent: totalAbsent,
+        workingDays,
+        present: uniquePresent.size
+      } 
+    })
   } catch (error) {
     console.error("Get All Attendance Error:", error)
     res.status(500).json({ error: error.message })
