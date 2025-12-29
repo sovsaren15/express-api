@@ -30,6 +30,7 @@ const https = require("https");
 const authRoutes = require("./routes/auth");
 const adminRoutes = require("./routes/admin");
 const employeeRoutes = require("./routes/employee");
+const { runAutoCheckOut } = require("./controllers/employeeController");
 
 const app = express();
 
@@ -144,7 +145,14 @@ app.use("/employee", (req, res, next) => {
               if (emp) name = `${emp.first_name} ${emp.last_name}`;
             }
 
-            const time = getCambodiaTime().toLocaleString();
+            const time = getCambodiaTime().toLocaleString("en-US", {
+              year: 'numeric',
+              month: '2-digit',
+              day: '2-digit',
+              hour: '2-digit',
+              minute: '2-digit',
+              hour12: true
+            });
             const emoji = type === 'checkin' ? '🟢' : '🔴';
 
             let statusLine = '';
@@ -195,59 +203,6 @@ app.use("/employee", employeeRoutes);
 /* =========================
    Auto Check-out Scheduler
 ========================= */
-
-const runAutoCheckOut = async () => {
-  const now = getCambodiaTime();
-  console.log(`⏰ Running Auto Check-out Task at ${now.toLocaleTimeString()}...`);
-  try {
-    // Define today's range
-    const startOfDay = new Date(now);
-    startOfDay.setHours(0, 0, 0, 0);
-    const endOfDay = new Date(now);
-    endOfDay.setHours(23, 59, 59, 999);
-
-    // Find active check-ins for today that haven't checked out
-    const { data: records, error } = await supabase
-      .from('attendance')
-      .select('id')
-      .is('check_out_time', null)
-      .gte('check_in_time', startOfDay.toISOString())
-      .lte('check_in_time', endOfDay.toISOString());
-
-    if (error) throw error;
-
-    if (records && records.length > 0) {
-      console.log(`Found ${records.length} forgotten check-outs.`);
-      
-      // Set check-out time to 1:00 PM (13:00) today
-      const autoCheckOutTime = new Date(now);
-      autoCheckOutTime.setHours(13, 0, 0, 0);
-
-      const ids = records.map(r => r.id);
-      const { error: updateError } = await supabase
-        .from('attendance')
-        .update({ check_out_time: autoCheckOutTime.toISOString() })
-        .in('id', ids);
-
-      if (updateError) throw updateError;
-      console.log(`✅ Auto Check-out applied to ${records.length} records.`);
-    } else {
-      console.log("No forgotten check-outs found.");
-    }
-  } catch (err) {
-    console.error("❌ Auto Check-out Error:", err.message);
-  }
-};
-
-// Check every minute if it's 11:30 PM to auto check-out forgotten employees
-setInterval(() => {
-  const now = getCambodiaTime();
-  // Trigger at 11:30 PM (23:30)
-  if (now.getHours() === 23 && now.getMinutes() === 30) {
-    runAutoCheckOut();
-  }
-}, 60000);
-
 // Manual Trigger Route for Testing
 app.post("/admin/trigger-auto-checkout", async (req, res) => {
   await runAutoCheckOut();

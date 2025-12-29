@@ -52,7 +52,7 @@ exports.login = async (req, res) => {
         employee_id: employee.employee_id,
       },
       process.env.JWT_SECRET,
-      { expiresIn: "365d" },
+      { expiresIn: "1y" },
     )
 
     res.json({

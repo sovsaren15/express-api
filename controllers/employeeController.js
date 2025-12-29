@@ -2,6 +2,7 @@ const { createClient } = require('@supabase/supabase-js');
 const faceapi = require("@vladmandic/face-api");
 const path = require("path");
 const fs = require("fs");
+const cron = require('node-cron');
 
 // Safely load canvas
 let canvas = {};
@@ -216,6 +217,83 @@ const checkOut = async (req, res) => {
     res.status(500).json({ error: error.message || 'Internal Server Error' });
   }
 };
+const runAutoCheckOut = async () => {
+  const now = getCambodiaTime(); // Using your helper function
+  
+  // Format for logging (12-hour format)
+  const timeOptions = { hour: "2-digit", minute: "2-digit", hour12: true };
+  
+  console.log(`⏰ Running Auto Check-out Task at ${now.toLocaleTimeString("en-US", timeOptions)}...`);
+
+  try {
+    // A. Define today's range (12:00:00 AM to 11:59:59 PM)
+    const startOfDay = new Date(now);
+    startOfDay.setHours(0, 0, 0, 0); 
+
+    const endOfDay = new Date(now);
+    endOfDay.setHours(23, 59, 59, 999);
+
+    // B. Find active check-ins for today that haven't checked out
+    const { data: records, error } = await supabase
+      .from('attendance')
+      .select('id, check_in_time')
+      .is('check_out_time', null)
+      .gte('check_in_time', startOfDay.toISOString())
+      .lte('check_in_time', endOfDay.toISOString());
+
+    if (error) throw error;
+
+    if (records && records.length > 0) {
+      console.log(`   Found ${records.length} forgotten check-outs.`);
+      
+      // Fetch configured auto check-out time from settings
+      const { data: settings } = await supabase
+        .from('settings')
+        .select('auto_checkout_time')
+        .limit(1)
+        .maybeSingle();
+
+      let targetHour = 17; // Default 5:00 PM
+      let targetMinute = 0;
+      if (settings?.auto_checkout_time) {
+        const [h, m] = settings.auto_checkout_time.split(':').map(Number);
+        if (!isNaN(h) && !isNaN(m)) { targetHour = h; targetMinute = m; }
+      }
+
+      for (const record of records) {
+        const checkOutTime = new Date(record.check_in_time);
+        checkOutTime.setHours(targetHour, targetMinute, 0, 0);
+        
+        // If check-in was later than auto-checkout time, set to end of day
+        if (new Date(record.check_in_time) > checkOutTime) {
+          checkOutTime.setHours(23, 59, 59, 999);
+        }
+
+        await supabase
+          .from('attendance')
+          .update({ 
+            check_out_time: checkOutTime.toISOString(),
+            status: 'present'
+          })
+          .eq('id', record.id);
+      }
+      console.log(`✅ Auto Check-out applied to ${records.length} records.`);
+    } else {
+      console.log("   No forgotten check-outs found.");
+    }
+  } catch (err) {
+    console.error("❌ Auto Check-out Error:", err.message);
+  }
+};
+
+// 2. Schedule the Task
+// Run every day at 11:59 PM (23:59)
+cron.schedule('59 23 * * *', () => {
+    runAutoCheckOut();
+}, {
+    timezone: "Asia/Phnom_Penh" // Important: Ensure it runs at Cambodia time
+});
+
 
 const getAttendanceHistory = async (req, res) => {
   try {
@@ -311,4 +389,4 @@ const deleteEmployee = async (req, res) => {
   }
 };
 
-module.exports = { checkIn, checkOut, getAttendanceHistory, getAllEmployees, deleteEmployee };
+module.exports = { checkIn, checkOut, getAttendanceHistory, getAllEmployees, deleteEmployee, runAutoCheckOut };
