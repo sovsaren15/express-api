@@ -33,6 +33,10 @@ const employeeRoutes = require("./routes/employee");
 
 const app = express();
 
+const getCambodiaTime = () => {
+  return new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Phnom_Penh" }));
+};
+
 /* =========================
    Middleware
 ========================= */
@@ -46,7 +50,7 @@ app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 
 // Request Logger - Helps verify if requests are hitting the server
 app.use((req, res, next) => {
-  console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`);
+  console.log(`[${getCambodiaTime().toISOString()}] ${req.method} ${req.url}`);
   if (req.path.startsWith('/admin') && !req.headers.authorization) {
     console.warn("⚠️  Warning: Admin route accessed without Authorization header (Expect 403/401)");
   }
@@ -140,17 +144,17 @@ app.use("/employee", (req, res, next) => {
               if (emp) name = `${emp.first_name} ${emp.last_name}`;
             }
 
-            const time = new Date().toLocaleString();
+            const time = getCambodiaTime().toLocaleString();
             const emoji = type === 'checkin' ? '🟢' : '🔴';
 
             let statusLine = '';
             if (type === 'checkin') {
               let status = data?.status_time || data?.data?.status_time || data?.data?.[0]?.status_time || data?.status || data?.data?.status;
               if (!status) {
-                const now = new Date();
-                const startThreshold = new Date();
+                const now = getCambodiaTime();
+                const startThreshold = getCambodiaTime();
                 startThreshold.setHours(8, 0, 0, 0);
-                const lateThreshold = new Date();
+                const lateThreshold = getCambodiaTime();
                 lateThreshold.setHours(8, 15, 0, 0);
                 
                 if (now < startThreshold) status = 'Early';
@@ -193,7 +197,7 @@ app.use("/employee", employeeRoutes);
 ========================= */
 
 const runAutoCheckOut = async () => {
-  const now = new Date();
+  const now = getCambodiaTime();
   console.log(`⏰ Running Auto Check-out Task at ${now.toLocaleTimeString()}...`);
   try {
     // Define today's range
@@ -237,7 +241,7 @@ const runAutoCheckOut = async () => {
 
 // Check every minute if it's 11:30 PM to auto check-out forgotten employees
 setInterval(() => {
-  const now = new Date();
+  const now = getCambodiaTime();
   // Trigger at 11:30 PM (23:30)
   if (now.getHours() === 23 && now.getMinutes() === 30) {
     runAutoCheckOut();

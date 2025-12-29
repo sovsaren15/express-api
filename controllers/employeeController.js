@@ -48,6 +48,10 @@ const getEuclideanDistance = (face1, face2) => {
   return Math.sqrt(face1.reduce((sum, val, i) => sum + Math.pow(val - face2[i], 2), 0));
 };
 
+const getCambodiaTime = () => {
+  return new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Phnom_Penh" }));
+};
+
 const checkIn = async (req, res) => {
   try {
     let imageBuffer;
@@ -95,7 +99,7 @@ const checkIn = async (req, res) => {
       return res.status(403).json({ error: "Face verification failed: Not your face" });
     }
 
-    const checkInDate = new Date();
+    const checkInDate = getCambodiaTime();
     const startTime = new Date(checkInDate);
     startTime.setHours(8, 0, 0, 0);
     const lateTime = new Date(checkInDate);
@@ -193,10 +197,11 @@ const checkOut = async (req, res) => {
     }
 
     // 2. Update that record
+    const checkOutDate = getCambodiaTime();
     const { data, error } = await supabase
       .from('attendance')
       .update({
-        check_out_time: new Date().toISOString(),
+        check_out_time: checkOutDate.toISOString(),
         status: 'present',
         check_out_image: imageBuffer.toString('base64')
       })
@@ -235,7 +240,7 @@ const getAttendanceHistory = async (req, res) => {
     if (error) throw error;
 
     // Calculate Absent Stats for Current Month
-    const now = new Date();
+    const now = getCambodiaTime();
     const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
     
     let workingDays = 0;
