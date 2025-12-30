@@ -50,7 +50,16 @@ const getEuclideanDistance = (face1, face2) => {
 };
 
 const getCambodiaTime = () => {
-  return new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Phnom_Penh" }));
+  const now = new Date();
+  const formatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: "Asia/Phnom_Penh",
+    year: 'numeric', month: 'numeric', day: 'numeric',
+    hour: 'numeric', minute: 'numeric', second: 'numeric',
+    hour12: false
+  });
+  const parts = formatter.formatToParts(now);
+  const part = (type) => parseInt(parts.find(p => p.type === type).value, 10);
+  return new Date(Date.UTC(part('year'), part('month') - 1, part('day'), part('hour'), part('minute'), part('second')));
 };
 
 const checkIn = async (req, res) => {
@@ -220,10 +229,9 @@ const checkOut = async (req, res) => {
 const runAutoCheckOut = async () => {
   const now = getCambodiaTime(); // Using your helper function
   
-  // Format for logging (12-hour format)
-  const timeOptions = { hour: "2-digit", minute: "2-digit", hour12: true };
-  
-  console.log(`⏰ Running Auto Check-out Task at ${now.toLocaleTimeString("en-US", timeOptions)}...`);
+  // Use UTC string for logging because 'now' is already shifted to Cambodia time in UTC
+  const timeString = now.toISOString().replace('T', ' ').substring(0, 19);
+  console.log(`⏰ Running Auto Check-out Task at ${timeString} (Cambodia Time)...`);
 
   try {
     // A. Define today's range (12:00:00 AM to 11:59:59 PM)
@@ -324,9 +332,9 @@ const getAttendanceHistory = async (req, res) => {
     let workingDays = 0;
     const d = new Date(startOfMonth);
     while (d <= now) {
-      const day = d.getDay();
+      const day = d.getUTCDay(); // Use UTC day to match the shifted time
       if (day !== 0 && day !== 6) workingDays++;
-      d.setDate(d.getDate() + 1);
+      d.setUTCDate(d.getUTCDate() + 1);
     }
 
     const uniquePresent = new Set();
@@ -334,7 +342,8 @@ const getAttendanceHistory = async (req, res) => {
       const recordDate = new Date(record.check_in_time);
       if (recordDate >= startOfMonth && recordDate <= now) {
         if (record.status === 'present') {
-          uniquePresent.add(recordDate.toDateString());
+          // Use ISO Date part (YYYY-MM-DD) which is based on UTC
+          uniquePresent.add(recordDate.toISOString().split('T')[0]);
         }
       }
     });
