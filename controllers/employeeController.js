@@ -4,50 +4,53 @@ const path = require("path");
 const fs = require("fs");
 const cron = require('node-cron');
 
-// Safely load canvas
+// --- 1. Configuration & Setup ---
+
+// Safely load canvas (Prevents crash on non-supported environments)
 let canvas = {};
 try {
   canvas = require("canvas");
 } catch (e) {
-  console.warn("Canvas failed to load:", e.message);
+  console.warn("⚠️ Canvas failed to load (Face API disabled):", e.message);
 }
 const { Canvas, Image, ImageData, loadImage } = canvas;
 
-// Initialize Supabase client
-// Ensure SUPABASE_URL and SUPABASE_KEY (or SUPABASE_SERVICE_ROLE_KEY) are in your .env file
+// Initialize Supabase
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY;
+if (!supabaseUrl || !supabaseKey) throw new Error("Missing Supabase credentials in .env");
 const supabase = createClient(supabaseUrl, supabaseKey);
 
-// Configure FaceAPI
+// Configure FaceAPI for Node.js
 if (Canvas) {
   faceapi.env.monkeyPatch({ Canvas, Image, ImageData, readFile: fs.promises.readFile });
 }
 
+// --- 2. AI Model Loading ---
 const modelsPath = path.join(__dirname, "..", "models");
 let modelsLoaded = false;
 
 const loadModels = async () => {
   if (modelsLoaded || !Canvas) return;
-  if (!fs.existsSync(modelsPath)) {
-    throw new Error(`FaceAPI models not found at ${modelsPath}. Ensure 'node download-models.js' runs during build.`);
+  
+  if (!fs.existsSync(modelsPath) || !fs.existsSync(path.join(modelsPath, "tiny_face_detector_model-weights_manifest.json"))) {
+    throw new Error(`❌ FaceAPI models missing at ${modelsPath}. Run 'node download-models.js'.`);
   }
-  if (!fs.existsSync(path.join(modelsPath, "tiny_face_detector_model-weights_manifest.json"))) {
-    throw new Error(`Model files missing in ${modelsPath}. Please run 'node download-models.js'.`);
-  }
-  await faceapi.nets.tinyFaceDetector.loadFromDisk(modelsPath);
-  await faceapi.nets.faceLandmark68Net.loadFromDisk(modelsPath);
-  await faceapi.nets.faceRecognitionNet.loadFromDisk(modelsPath);
+
+  console.log("⏳ Loading FaceAPI models...");
+  await Promise.all([
+    faceapi.nets.tinyFaceDetector.loadFromDisk(modelsPath),
+    faceapi.nets.faceLandmark68Net.loadFromDisk(modelsPath),
+    faceapi.nets.faceRecognitionNet.loadFromDisk(modelsPath)
+  ]);
   modelsLoaded = true;
+  console.log("✅ FaceAPI models loaded.");
 };
 
-// Preload models on server start to reduce first-request latency
+// Preload models on startup
 loadModels().catch(console.error);
 
-const getEuclideanDistance = (face1, face2) => {
-  if (!face1 || !face2 || face1.length !== face2.length) return Infinity;
-  return Math.sqrt(face1.reduce((sum, val, i) => sum + Math.pow(val - face2[i], 2), 0));
-};
+// --- 3. Helper Functions ---
 
 const getCambodiaTime = () => {
   const now = new Date();
@@ -59,117 +62,100 @@ const getCambodiaTime = () => {
   });
   const parts = formatter.formatToParts(now);
   const part = (type) => parseInt(parts.find(p => p.type === type).value, 10);
+  // Returns a Date object shifted to Cambodia time
   return new Date(Date.UTC(part('year'), part('month') - 1, part('day'), part('hour'), part('minute'), part('second')));
 };
 
+const getEuclideanDistance = (face1, face2) => {
+  if (!face1 || !face2 || face1.length !== face2.length) return Infinity;
+  return Math.sqrt(face1.reduce((sum, val, i) => sum + Math.pow(val - face2[i], 2), 0));
+};
+
+const getImageBuffer = (req) => {
+  if (req.file) return req.file.buffer;
+  if (req.body.image) {
+    const base64Data = req.body.image.replace(/^data:image\/\w+;base64,\s*/i, "");
+    return Buffer.from(base64Data, "base64");
+  }
+  return null;
+};
+
+// Helper to run face detection logic
+const detectFace = async (imageBuffer) => {
+  if (!loadImage) throw new Error("Face verification unavailable: Server missing graphics libraries.");
+  if (!modelsLoaded) await loadModels();
+  
+  const img = await loadImage(imageBuffer);
+  return faceapi.detectSingleFace(img, new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.5 }))
+    .withFaceLandmarks()
+    .withFaceDescriptor();
+};
+
+// --- 4. Controller Functions ---
+
 const checkIn = async (req, res) => {
   try {
-    let imageBuffer;
-    if (req.file) {
-      imageBuffer = req.file.buffer;
-    } else if (req.body.image) {
-      const base64Data = req.body.image.replace(/^data:image\/\w+;base64,\s*/i, "");
-      imageBuffer = Buffer.from(base64Data, "base64");
-    }
+    const imageBuffer = getImageBuffer(req);
+    const user = req.user;
 
-    if (!imageBuffer) {
-      return res.status(400).json({ error: "Image capture is required for check-in" });
-    }
-    const user = req.user; // Populated by authMiddleware
+    if (!imageBuffer) return res.status(400).json({ error: "Image capture is required for check-in" });
+    if (!user || !user.id) return res.status(401).json({ error: 'Unauthorized: User not identified' });
 
-    if (!user || !user.id) {
-      return res.status(401).json({ error: 'Unauthorized: User not identified' });
-    }
-
-    // Parallelize DB fetch and Image Processing for speed
-    const employeeTask = supabase
-      .from('employees')
-      .select('face_encoding')
-      .eq('id', user.id)
-      .single();
-
-    const detectionTask = (async () => {
-      if (!loadImage) throw new Error("Face verification unavailable: Server missing graphics libraries.");
-      if (!modelsLoaded) await loadModels();
-      const img = await loadImage(imageBuffer);
-      return faceapi.detectSingleFace(img, new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.5 })).withFaceLandmarks().withFaceDescriptor();
-    })();
+    // 1. Run DB Fetch and Face Detection in Parallel
+    const employeeTask = supabase.from('employees').select('face_encoding').eq('id', user.id).single();
+    const detectionTask = detectFace(imageBuffer);
 
     const [{ data: employee, error: empError }, detection] = await Promise.all([employeeTask, detectionTask]);
 
+    // 2. Validations
     if (empError || !employee) return res.status(404).json({ error: 'Employee record not found' });
     if (!employee.face_encoding) return res.status(400).json({ error: 'Face not registered. Please contact admin.' });
     if (!detection) return res.status(400).json({ error: "No face detected in camera feed" });
 
-    const currentEncoding = detection.descriptor;
+    // 3. Verify Face
+    const distance = getEuclideanDistance(employee.face_encoding, detection.descriptor);
+    if (distance > 0.5) return res.status(403).json({ error: "Face verification failed: Not your face" });
 
-    // 3. Compare Encodings
-    const distance = getEuclideanDistance(employee.face_encoding, currentEncoding);
-    if (distance > 0.5) { // Threshold: Lower is stricter
-      return res.status(403).json({ error: "Face verification failed: Not your face" });
-    }
-
+    // 4. Calculate Status (Early/Late)
     const checkInDate = getCambodiaTime();
-    const startTime = new Date(checkInDate);
-    startTime.setHours(8, 0, 0, 0);
-    const lateTime = new Date(checkInDate);
-    lateTime.setHours(8, 15, 0, 0);
+    const startTime = new Date(checkInDate); startTime.setHours(8, 0, 0, 0);
+    const lateTime = new Date(checkInDate); lateTime.setHours(8, 15, 0, 0);
 
     let statusTime = 'On Time';
     if (checkInDate < startTime) statusTime = 'Early';
     else if (checkInDate > lateTime) statusTime = 'Late';
 
-    // Insert attendance record into the 'attendance' table
-    const { data, error } = await supabase
-      .from('attendance')
-      .insert([
-        {
-          employee_id: user.id,
-          check_in_time: checkInDate.toISOString(),
-          status: 'present',
-          status_time: statusTime,
-          check_in_image: imageBuffer.toString('base64')
-        }
-      ])
-      .select();
+    // 5. Insert Record
+    const { data, error } = await supabase.from('attendance').insert([{
+      employee_id: user.id,
+      check_in_time: checkInDate.toISOString(),
+      status: 'present',
+      status_time: statusTime,
+      check_in_image: imageBuffer.toString('base64')
+    }]).select();
 
     if (error) throw error;
-
     res.status(200).json({ message: 'Check-in successful', data });
+
   } catch (error) {
-    console.error('Check-in Controller Error:', error);
+    console.error('Check-in Error:', error);
     res.status(500).json({ error: error.message || 'Internal Server Error' });
   }
 };
 
 const checkOut = async (req, res) => {
   try {
-    let imageBuffer;
-    if (req.file) {
-      imageBuffer = req.file.buffer;
-    } else if (req.body.image) {
-      const base64Data = req.body.image.replace(/^data:image\/\w+;base64,\s*/i, "");
-      imageBuffer = Buffer.from(base64Data, "base64");
-    }
-
-    if (!imageBuffer) {
-      return res.status(400).json({ error: "Image capture is required for check-out" });
-    }
+    const imageBuffer = getImageBuffer(req);
     const user = req.user;
 
-    if (!user || !user.id) {
-      return res.status(401).json({ error: 'Unauthorized: User not identified' });
-    }
+    if (!imageBuffer) return res.status(400).json({ error: "Image capture is required for check-out" });
+    if (!user || !user.id) return res.status(401).json({ error: 'Unauthorized: User not identified' });
 
-    // Parallelize tasks: Fetch Employee, Fetch Last Check-In, Process Face
-    const employeeTask = supabase
-      .from('employees')
-      .select('face_encoding')
-      .eq('id', user.id)
-      .single();
-
-    const lastCheckInTask = supabase
-      .from('attendance')
+    // 1. Run Tasks in Parallel
+    const employeeTask = supabase.from('employees').select('face_encoding').eq('id', user.id).single();
+    
+    // Find latest active check-in
+    const lastCheckInTask = supabase.from('attendance')
       .select('*')
       .eq('employee_id', user.id)
       .is('check_out_time', null)
@@ -177,12 +163,7 @@ const checkOut = async (req, res) => {
       .limit(1)
       .maybeSingle();
 
-    const detectionTask = (async () => {
-      if (!loadImage) throw new Error("Face verification unavailable: Server missing graphics libraries.");
-      if (!modelsLoaded) await loadModels();
-      const img = await loadImage(imageBuffer);
-      return faceapi.detectSingleFace(img, new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.5 })).withFaceLandmarks().withFaceDescriptor();
-    })();
+    const detectionTask = detectFace(imageBuffer);
 
     const [
       { data: employee, error: empError },
@@ -190,26 +171,21 @@ const checkOut = async (req, res) => {
       detection
     ] = await Promise.all([employeeTask, lastCheckInTask, detectionTask]);
 
+    // 2. Validations
     if (empError || !employee) return res.status(404).json({ error: 'Employee record not found' });
     if (!employee.face_encoding) return res.status(400).json({ error: 'Face not registered. Please contact admin.' });
     if (!detection) return res.status(400).json({ error: "No face detected in camera feed" });
 
-    const currentEncoding = detection.descriptor;
-    const distance = getEuclideanDistance(employee.face_encoding, currentEncoding);
-
-    if (distance > 0.5) {
-      return res.status(403).json({ error: "Face verification failed: Not your face" });
-    }
+    // 3. Verify Face
+    const distance = getEuclideanDistance(employee.face_encoding, detection.descriptor);
+    if (distance > 0.5) return res.status(403).json({ error: "Face verification failed: Not your face" });
 
     if (findError) throw findError;
-    if (!lastCheckIn) {
-      return res.status(400).json({ error: 'No active check-in found. Please check in first.' });
-    }
+    if (!lastCheckIn) return res.status(400).json({ error: 'No active check-in found. Please check in first.' });
 
-    // 2. Update that record
+    // 4. Update Record
     const checkOutDate = getCambodiaTime();
-    const { data, error } = await supabase
-      .from('attendance')
+    const { data, error } = await supabase.from('attendance')
       .update({
         check_out_time: checkOutDate.toISOString(),
         status: 'present',
@@ -219,29 +195,25 @@ const checkOut = async (req, res) => {
       .select();
 
     if (error) throw error;
-
     res.status(200).json({ message: 'Check-out successful', data });
+
   } catch (error) {
-    console.error('Check-out Controller Error:', error);
+    console.error('Check-out Error:', error);
     res.status(500).json({ error: error.message || 'Internal Server Error' });
   }
 };
+
 const runAutoCheckOut = async () => {
-  const now = getCambodiaTime(); // Using your helper function
-  
-  // Use UTC string for logging because 'now' is already shifted to Cambodia time in UTC
+  const now = getCambodiaTime();
   const timeString = now.toISOString().replace('T', ' ').substring(0, 19);
   console.log(`⏰ Running Auto Check-out Task at ${timeString} (Cambodia Time)...`);
 
   try {
-    // A. Define today's range (12:00:00 AM to 11:59:59 PM)
-    const startOfDay = new Date(now);
-    startOfDay.setHours(0, 0, 0, 0); 
+    // 1. Define Range (Today)
+    const startOfDay = new Date(now); startOfDay.setUTCHours(0, 0, 0, 0);
+    const endOfDay = new Date(now); endOfDay.setUTCHours(23, 59, 59, 999);
 
-    const endOfDay = new Date(now);
-    endOfDay.setHours(23, 59, 59, 999);
-
-    // B. Find active check-ins for today that haven't checked out
+    // 2. Find forgotten check-outs
     const { data: records, error } = await supabase
       .from('attendance')
       .select('id, check_in_time')
@@ -253,38 +225,21 @@ const runAutoCheckOut = async () => {
 
     if (records && records.length > 0) {
       console.log(`   Found ${records.length} forgotten check-outs.`);
-      
-      // Fetch configured auto check-out time from settings
-      const { data: settings } = await supabase
-        .from('settings')
-        .select('auto_checkout_time')
-        .limit(1)
-        .maybeSingle();
 
-      let targetHour = 17; // Default 5:00 PM
-      let targetMinute = 0;
-      if (settings?.auto_checkout_time) {
-        const [h, m] = settings.auto_checkout_time.split(':').map(Number);
-        if (!isNaN(h) && !isNaN(m)) { targetHour = h; targetMinute = m; }
-      }
+      // 4. Update All Records concurrently (Optimized)
+      const updates = records.map(async (record) => {
+        // Use current Cambodia time (when script runs) as checkout time
+        const checkOutTime = new Date(now);
 
-      for (const record of records) {
-        const checkOutTime = new Date(record.check_in_time);
-        checkOutTime.setHours(targetHour, targetMinute, 0, 0);
-        
-        // If check-in was later than auto-checkout time, set to end of day
-        if (new Date(record.check_in_time) > checkOutTime) {
-          checkOutTime.setHours(23, 59, 59, 999);
-        }
-
-        await supabase
-          .from('attendance')
+        return supabase.from('attendance')
           .update({ 
             check_out_time: checkOutTime.toISOString(),
             status: 'present'
           })
           .eq('id', record.id);
-      }
+      });
+
+      await Promise.all(updates);
       console.log(`✅ Auto Check-out applied to ${records.length} records.`);
     } else {
       console.log("   No forgotten check-outs found.");
@@ -294,57 +249,39 @@ const runAutoCheckOut = async () => {
   }
 };
 
-// 2. Schedule the Task
-// Run every day at 11:59 PM (23:59)
-cron.schedule('59 23 * * *', () => {
-    runAutoCheckOut();
-}, {
-    timezone: "Asia/Phnom_Penh" // Important: Ensure it runs at Cambodia time
-});
-
-
 const getAttendanceHistory = async (req, res) => {
   try {
     const user = req.user;
+    if (!user || !user.id) return res.status(401).json({ error: 'Unauthorized' });
 
-    if (!user || !user.id) {
-      return res.status(401).json({ error: 'Unauthorized: User not identified' });
-    }
-
-    const { data: employee } = await supabase
-      .from('employees')
-      .select('first_name, last_name')
-      .eq('id', user.id)
-      .single();
-
-    const { data, error } = await supabase
-      .from('attendance')
-      .select('*')
-      .eq('employee_id', user.id)
-      .order('check_in_time', { ascending: false });
+    // Parallel fetch: Employee details & Attendance Logs
+    const [{ data: employee }, { data, error }] = await Promise.all([
+      supabase.from('employees').select('first_name, last_name').eq('id', user.id).single(),
+      supabase.from('attendance')
+        .select('id, employee_id, check_in_time, check_out_time, status, status_time')
+        .eq('employee_id', user.id)
+        .order('check_in_time', { ascending: false })
+    ]);
 
     if (error) throw error;
 
-    // Calculate Absent Stats for Current Month
+    // Stats Calculation
     const now = getCambodiaTime();
     const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
     
     let workingDays = 0;
     const d = new Date(startOfMonth);
     while (d <= now) {
-      const day = d.getUTCDay(); // Use UTC day to match the shifted time
-      if (day !== 0 && day !== 6) workingDays++;
+      const day = d.getUTCDay();
+      if (day !== 0 && day !== 6) workingDays++; // Exclude Sun (0) & Sat (6)
       d.setUTCDate(d.getUTCDate() + 1);
     }
 
     const uniquePresent = new Set();
     data.forEach((record) => {
       const recordDate = new Date(record.check_in_time);
-      if (recordDate >= startOfMonth && recordDate <= now) {
-        if (record.status === 'present') {
-          // Use ISO Date part (YYYY-MM-DD) which is based on UTC
-          uniquePresent.add(recordDate.toISOString().split('T')[0]);
-        }
+      if (recordDate >= startOfMonth && recordDate <= now && record.status === 'present') {
+        uniquePresent.add(recordDate.toISOString().split('T')[0]); // YYYY-MM-DD
       }
     });
 
@@ -353,49 +290,45 @@ const getAttendanceHistory = async (req, res) => {
     res.status(200).json({ 
       data, 
       employee, 
-      stats: { 
-        absent: absentCount,
-        workingDays,
-        present: uniquePresent.size
-      } 
+      stats: { absent: absentCount, workingDays, present: uniquePresent.size } 
     });
   } catch (error) {
-    console.error('Get Attendance History Error:', error);
-    res.status(500).json({ error: error.message || 'Internal Server Error' });
+    console.error('Get History Error:', error);
+    res.status(500).json({ error: error.message });
   }
 };
 
 const getAllEmployees = async (req, res) => {
   try {
-    const { data, error } = await supabase
-      .from('employees')
-      .select('*');
-
+    const { data, error } = await supabase.from('employees').select('*');
     if (error) throw error;
-
     res.status(200).json({ data });
   } catch (error) {
-    console.error('Get All Employees Error:', error);
-    res.status(500).json({ error: error.message || 'Internal Server Error' });
+    res.status(500).json({ error: error.message });
   }
 };
 
 const deleteEmployee = async (req, res) => {
   try {
     const { id } = req.params;
-    
-    const { error } = await supabase
-      .from('employees')
-      .delete()
-      .eq('id', id);
-
+    const { error } = await supabase.from('employees').delete().eq('id', id);
     if (error) throw error;
-
     res.status(200).json({ success: true, message: 'Employee deleted successfully' });
   } catch (error) {
-    console.error('Delete Employee Error:', error);
-    res.status(500).json({ error: error.message || 'Internal Server Error' });
+    res.status(500).json({ error: error.message });
   }
 };
 
-module.exports = { checkIn, checkOut, getAttendanceHistory, getAllEmployees, deleteEmployee, runAutoCheckOut };
+// --- 5. Scheduler ---
+// Run every day at 11:59 PM Cambodia Time
+cron.schedule('59 23 * * *', runAutoCheckOut, { timezone: "Asia/Phnom_Penh" });
+
+// --- 6. Exports ---
+module.exports = { 
+  checkIn, 
+  checkOut, 
+  getAttendanceHistory, 
+  getAllEmployees, 
+  deleteEmployee, 
+  runAutoCheckOut 
+};

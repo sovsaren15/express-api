@@ -1,61 +1,56 @@
-const jwt = require("jsonwebtoken")
-const { createClient } = require("@supabase/supabase-js")
+const jwt = require("jsonwebtoken");
 
 exports.login = async (req, res) => {
-  const { email, employee_id, password } = req.body
-  const supabase = req.app.locals.supabase
+  const { email, employee_id, password } = req.body;
+  const supabase = req.app.locals.supabase;
+
+  // 1. Basic Validation
+  if ((!email && !employee_id) || !password) {
+    return res.status(400).json({ error: "Email/ID and password are required" });
+  }
 
   try {
-    // Find employee by email or employee_id
-    let query = supabase.from("employees").select("*")
+    // 2. Find Employee in DB
+    // Construct filter: checks email OR employee_id depending on what was sent
+    const searchFilter = email ? `email.eq.${email}` : `employee_id.eq.${employee_id}`;
+    
+    const { data: employee, error: findError } = await supabase
+      .from("employees")
+      .select("*")
+      .or(searchFilter)
+      .maybeSingle(); // Returns null if not found, instead of throwing error
 
-    if (email) {
-      query = query.eq("email", email)
-    } else if (employee_id) {
-      query = query.eq("employee_id", employee_id)
-    } else {
-      return res.status(400).json({ error: "Email or employee_id required" })
+    if (findError || !employee) {
+      return res.status(401).json({ error: "Invalid credentials" });
     }
 
-    const { data: employee, error } = await query.single()
-
-    if (error || !employee) {
-      console.error("Login failed: Employee not found in database or query error:", error)
-      return res.status(401).json({ error: "Invalid credentials" })
-    }
-
-    // Verify password via Supabase Auth
-    // Use a separate client instance for authentication to avoid tainting the global service role client
-    const authClient = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY, {
-      auth: {
-        autoRefreshToken: false,
-        persistSession: false,
-      },
-    })
-
-    const { data, error: authError } = await authClient.auth.signInWithPassword({
+    // 3. Verify Password via Supabase Auth
+    // Use the email from the DB record to ensure we authenticate the correct user
+    const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
       email: employee.email,
       password,
-    })
+    });
 
-    if (authError) {
-      console.error("Login failed: Supabase Auth password verification failed:", authError.message)
-      return res.status(401).json({ error: "Invalid credentials" })
+    if (authError || !authData.user) {
+      console.warn(`Login failed: Password mismatch for user ${employee.email}`);
+      return res.status(401).json({ error: "Invalid credentials" });
     }
 
-    // Generate JWT token
+    // 4. Generate Custom JWT
     const token = jwt.sign(
       {
-        id: employee.id,
+        id: employee.id,            // Primary Key in 'employees' table
+        auth_uid: authData.user.id, // Supabase Auth User ID
         email: employee.email,
         role: employee.is_admin ? "admin" : "employee",
         employee_id: employee.employee_id,
       },
       process.env.JWT_SECRET,
-      { expiresIn: "1y" },
-    )
+      { expiresIn: "1y" }
+    );
 
     res.json({
+      message: "Login successful",
       token,
       employee: {
         id: employee.id,
@@ -65,9 +60,10 @@ exports.login = async (req, res) => {
         employee_id: employee.employee_id,
         is_admin: employee.is_admin,
       },
-    })
+    });
+
   } catch (err) {
-    console.error("Login Error:", err)
-    res.status(500).json({ error: "Internal server error" })
+    console.error("Login Controller Error:", err.message);
+    res.status(500).json({ error: "Internal server error" });
   }
-}
+};
