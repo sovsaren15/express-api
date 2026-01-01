@@ -124,6 +124,7 @@ app.use("/employee", (req, res, next) => {
 // --- 8. Routes ---
 app.use("/api", authRoutes); // Standard API prefix
 app.use("/auth", authRoutes); // Legacy support
+app.use("/", authRoutes); // Support root-level auth routes (fixes /login 404)
 app.use("/admin", adminRoutes);
 app.use("/employee", employeeRoutes);
 
